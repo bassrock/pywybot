@@ -1,0 +1,30 @@
+name: Publish to PyPI
+
+# Publishes on a GitHub Release using PyPI Trusted Publishing (OIDC).
+# One-time setup: on PyPI, add a trusted publisher for project "pywybot"
+# pointing at this repo and the "publish.yml" workflow.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
