@@ -14,7 +14,7 @@ from .exceptions import WybotAuthError, WybotConnectionError, WybotError
 from .http_client import WyBotHTTPClient
 from .mqtt_client import WyBotMQTTClient
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "BluetoothAdapter",

@@ -1,23 +1,65 @@
-"""Tests for wybot.mqtt_client.WyBotMQTTClient."""
+"""Tests for wybot.mqtt_client.WyBotMQTTClient (async aiomqtt API)."""
 
+import asyncio
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiomqtt
 import pytest
 
 from wybot import mqtt_client
 from wybot.mqtt_client import WyBotMQTTClient
 
 
-@pytest.fixture
-def mock_mqtt(monkeypatch):
-    """Patch paho's mqtt.Client with a MagicMock factory."""
-    instance = MagicMock()
-    instance.is_connected.return_value = True
-    instance.publish.return_value = MagicMock(rc=mqtt_client.mqtt.MQTT_ERR_SUCCESS, mid=1)
-    factory = MagicMock(return_value=instance)
-    monkeypatch.setattr(mqtt_client.mqtt, "Client", factory)
-    return instance
+# --------------------------- fake aiomqtt helpers ---------------------------
+
+
+class _Msg:
+    """A minimal stand-in for an aiomqtt.Message."""
+
+    def __init__(self, topic, payload):
+        self.topic = topic
+        self.payload = payload
+
+
+class _FakeCM:
+    """Fake ``async with aiomqtt.Client(...)`` context manager."""
+
+    def __init__(self, client=None, exc=None):
+        self._client = client
+        self._exc = exc
+
+    async def __aenter__(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._client
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def _async_iter(messages):
+    async def _gen():
+        for m in messages:
+            yield m
+
+    return _gen()
+
+
+def _fake_client(messages=()):
+    c = MagicMock()
+    c.subscribe = AsyncMock()
+    c.publish = AsyncMock()
+    c.messages = _async_iter(messages)
+    return c
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """Patch asyncio.sleep so reconnect backoff does not actually wait."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(mqtt_client.asyncio, "sleep", sleep)
+    return sleep
 
 
 @pytest.fixture
@@ -26,271 +68,264 @@ def on_message():
 
 
 @pytest.fixture
-def client(mock_mqtt, on_message):
+def client(on_message):
     return WyBotMQTTClient(on_message)
 
 
-# --------------------------- construction ---------------------------
+# --------------------------- _run background loop ---------------------------
 
 
-def test_construction_sets_callbacks(client, mock_mqtt):
-    mock_mqtt.username_pw_set.assert_called_once_with(
-        mqtt_client.USERNAME, mqtt_client.PASWORD
+async def test_run_connects_subscribes_and_handles_message(monkeypatch):
+    received = []
+    holder = {}
+
+    def on_message(topic, payload):
+        received.append((topic, payload))
+        holder["client"]._stop = True
+
+    c = WyBotMQTTClient(on_message)
+    holder["client"] = c
+    c._subscriptions = {"/will/dev1"}
+    c._devices = {"dev1"}
+    fake = _fake_client([_Msg("/will/dev1", json.dumps({"a": 1}).encode())])
+    monkeypatch.setattr(
+        mqtt_client.aiomqtt, "Client", MagicMock(return_value=_FakeCM(fake))
     )
-    assert mock_mqtt.on_connect == client._on_connect
-    assert mock_mqtt.on_message == client._on_message_handler
-    assert mock_mqtt.on_disconnect == client._on_disconnect
+
+    await c.connect()
+    await asyncio.wait_for(c._task, timeout=5)
+
+    assert received == [("/will/dev1", {"a": 1})]
+    # Re-subscribed to the one stored subscription on (re)connect.
+    assert fake.subscribe.await_count == 1
+    # ensure_device_sends_statuses publishes 15 query DPs for the device.
+    assert fake.publish.await_count == 15
+    assert c.is_connected() is False
+
+
+async def test_run_reconnects_on_mqtt_error(monkeypatch, _no_sleep):
+    received = []
+    holder = {}
+
+    def on_message(topic, payload):
+        received.append((topic, payload))
+        holder["client"]._stop = True
+
+    c = WyBotMQTTClient(on_message)
+    holder["client"] = c
+    good = _fake_client([_Msg("/will/dev1", b"{}")])
+    monkeypatch.setattr(
+        mqtt_client.aiomqtt,
+        "Client",
+        MagicMock(
+            side_effect=[
+                _FakeCM(exc=aiomqtt.MqttError("down")),
+                _FakeCM(good),
+            ]
+        ),
+    )
+
+    await c.connect()
+    await asyncio.wait_for(c._task, timeout=5)
+
+    assert received == [("/will/dev1", {})]
+    _no_sleep.assert_awaited()  # backoff sleep happened between attempts
+
+
+async def test_run_reconnects_on_generic_error(monkeypatch, _no_sleep):
+    received = []
+    holder = {}
+
+    def on_message(topic, payload):
+        received.append((topic, payload))
+        holder["client"]._stop = True
+
+    c = WyBotMQTTClient(on_message)
+    holder["client"] = c
+    good = _fake_client([_Msg("/t", b"{}")])
+    monkeypatch.setattr(
+        mqtt_client.aiomqtt,
+        "Client",
+        MagicMock(
+            side_effect=[
+                _FakeCM(exc=RuntimeError("boom")),
+                _FakeCM(good),
+            ]
+        ),
+    )
+
+    await c.connect()
+    await asyncio.wait_for(c._task, timeout=5)
+
+    assert received == [("/t", {})]
+    _no_sleep.assert_awaited()
+
+
+# --------------------------- connect / disconnect ---------------------------
+
+
+async def test_connect_idempotent_when_task_running(client):
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    client._task = fake_task
+    await client.connect()
+    assert client._task is fake_task  # no new task created
+
+
+async def test_disconnect_cancels_task(client):
+    async def _forever():
+        await asyncio.Event().wait()
+
+    client._task = asyncio.create_task(_forever())
+    client._connected = True
+    await client.disconnect()
+    assert client._task is None
+    assert client._stop is True
     assert client._connected is False
 
 
-# --------------------------- connect ---------------------------
-
-
-def test_connect_normal(client, mock_mqtt):
-    client.connect()
-    mock_mqtt.connect.assert_called_once_with(mqtt_client.MQTT_URL)
-    mock_mqtt.loop_start.assert_called_once()
-    assert client._connecting is True
-    assert client._loop_started is True
-
-
-def test_connect_already_connecting_noop(client, mock_mqtt):
-    client._connecting = True
-    client.connect()
-    mock_mqtt.connect.assert_not_called()
-
-
-def test_connect_already_connected_noop(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    client.connect()
-    mock_mqtt.connect.assert_not_called()
-
-
-def test_connect_flag_drift_forces_reconnect(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = False
-    client.connect()
-    mock_mqtt.reconnect.assert_called_once()
-    assert client._connected is False
-    assert client._connecting is True
-
-
-def test_connect_flag_drift_reconnect_fails(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = False
-    mock_mqtt.reconnect.side_effect = Exception("boom")
-    client.connect()
-    assert client._connecting is False
-
-
-def test_connect_connect_raises(client, mock_mqtt):
-    mock_mqtt.connect.side_effect = Exception("no network")
-    client.connect()
-    assert client._connecting is False
+async def test_disconnect_no_task(client):
+    await client.disconnect()
+    assert client._stop is True
     assert client._connected is False
 
 
-def test_connect_loop_already_started(client, mock_mqtt):
-    client._loop_started = True
-    client.connect()
-    mock_mqtt.loop_start.assert_not_called()
+# --------------------------- is_connected ---------------------------
 
 
-# --------------------------- is_connected / disconnect ---------------------------
-
-
-def test_is_connected_true(client, mock_mqtt):
+def test_is_connected_true(client):
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
     assert client.is_connected() is True
 
 
-def test_is_connected_false(client, mock_mqtt):
+def test_is_connected_false(client):
     client._connected = False
     assert client.is_connected() is False
-
-
-def test_disconnect(client, mock_mqtt):
-    client._loop_started = True
-    client.disconnect()
-    mock_mqtt.loop_stop.assert_called_once()
-    mock_mqtt.disconnect.assert_called_once()
-    assert client._connected is False
-    assert client._loop_started is False
-
-
-def test_disconnect_swallows_error(client, mock_mqtt):
-    client._loop_started = False
-    mock_mqtt.disconnect.side_effect = Exception("boom")
-    client.disconnect()  # should not raise
-    mock_mqtt.loop_stop.assert_not_called()
-
-
-# --------------------------- paho callbacks ---------------------------
-
-
-def test_on_connect_success_resubscribes(client, mock_mqtt):
-    client._subscriptions = {"/will/dev1"}
-    client._devices = {"dev1"}
-    client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    cb_client = MagicMock()
-    client._on_connect(cb_client, None, None, 0)
-    assert client._connected is True
-    assert client._connecting is False
-    cb_client.subscribe.assert_called_once_with("/will/dev1")
-    # ensure_device_sends_statuses publishes query commands for the device
-    assert mock_mqtt.publish.called
-
-
-def test_on_connect_failure(client, mock_mqtt):
-    client._on_connect(MagicMock(), None, None, 5)
-    assert client._connected is False
-    assert client._connecting is False
-
-
-def test_on_connect_fail_callback(client):
-    client._connecting = True
-    client._on_connect_fail(MagicMock(), None)
-    assert client._connected is False
-    assert client._connecting is False
-
-
-def test_on_disconnect_clean(client):
-    client._connected = True
-    client._on_disconnect(MagicMock(), None, 0)
-    assert client._connected is False
-
-
-def test_on_disconnect_unexpected(client):
-    client._connected = True
-    client._on_disconnect(MagicMock(), None, 1)
-    assert client._connected is False
 
 
 # --------------------------- subscribe_for_device ---------------------------
 
 
-def test_subscribe_for_device(client, mock_mqtt):
+async def test_subscribe_for_device_when_connected(client):
+    fake = _fake_client()
+    client._client = fake
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    client.subscribe_for_device("dev1")
+    await client.subscribe_for_device("dev1")
     assert "dev1" in client._devices
-    # six topics subscribed
-    assert mock_mqtt.subscribe.call_count == 6
+    assert len(client._subscriptions) == 6
+    assert fake.subscribe.await_count == 6
+    # ensure_device_sends_statuses fires 15 query publishes.
+    assert fake.publish.await_count == 15
+
+
+async def test_subscribe_for_device_no_client(client):
+    # No live client: topics are recorded but nothing is published/subscribed.
+    client._client = None
+    client._connected = False
+    await client.subscribe_for_device("dev1")
+    assert "dev1" in client._devices
     assert len(client._subscriptions) == 6
 
 
-def test_subscribe_for_device_idempotent(client, mock_mqtt):
+async def test_subscribe_for_device_idempotent(client):
+    fake = _fake_client()
+    client._client = fake
+    client._connected = True
     client._devices.add("dev1")
-    client.subscribe_for_device("dev1")
-    mock_mqtt.subscribe.assert_not_called()
+    await client.subscribe_for_device("dev1")
+    fake.subscribe.assert_not_called()
 
 
 # --------------------------- ensure_device_sends_statuses ---------------------------
 
 
-def test_ensure_device_sends_statuses(client, mock_mqtt):
+async def test_ensure_device_sends_statuses(client):
+    fake = _fake_client()
+    client._client = fake
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    client.ensure_device_sends_statuses("dev1")
-    # 15 DPs queried
-    assert mock_mqtt.publish.call_count == 15
+    await client.ensure_device_sends_statuses("dev1")
+    assert fake.publish.await_count == 15
 
 
-# --------------------------- send_query_command_for_device ---------------------------
+# --------------------------- send query / write ---------------------------
 
 
-def test_send_query_connected_success(client, mock_mqtt):
+async def test_send_query_connected_success(client):
+    fake = _fake_client()
+    client._client = fake
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    client.send_query_command_for_device("dev1", {"cmd": 9})
-    mock_mqtt.publish.assert_called_once()
+    await client.send_query_command_for_device("dev1", {"cmd": 9})
+    fake.publish.assert_awaited_once()
+    topic, _payload = fake.publish.await_args[0]
+    assert topic == "/device/DATA/recv_transparent_query_data/dev1"
 
 
-def test_send_query_not_connected(client, mock_mqtt):
-    client._connected = False
-    client.send_query_command_for_device("dev1", {"cmd": 9})
-    mock_mqtt.publish.assert_not_called()
+async def test_send_write_connected_success(client):
+    fake = _fake_client()
+    client._client = fake
+    client._connected = True
+    await client.send_write_command_for_device("dev1", {"cmd": 4})
+    fake.publish.assert_awaited_once()
+    topic, _payload = fake.publish.await_args[0]
+    assert topic == "/device/DATA/recv_transparent_cmd_data/dev1"
 
 
-def test_send_query_disabled(client, mock_mqtt, monkeypatch):
+# --------------------------- _publish ---------------------------
+
+
+async def test_publish_disabled(client, monkeypatch):
     monkeypatch.setattr(mqtt_client, "DISABLE_MQTT_COMMANDS", True)
+    fake = _fake_client()
+    client._client = fake
     client._connected = True
-    client.send_query_command_for_device("dev1", {"cmd": 9})
-    mock_mqtt.publish.assert_not_called()
+    await client._publish("/topic", {"cmd": 9}, "query")
+    fake.publish.assert_not_called()
 
 
-def test_send_query_publish_failure(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    mock_mqtt.publish.return_value = MagicMock(rc=1)
-    client.send_query_command_for_device("dev1", {"cmd": 9})
-    mock_mqtt.publish.assert_called_once()
-
-
-def test_send_query_exception(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    mock_mqtt.publish.side_effect = Exception("boom")
-    client.send_query_command_for_device("dev1", {"cmd": 9})  # swallowed
-
-
-# --------------------------- send_write_command_for_device ---------------------------
-
-
-def test_send_write_connected_success(client, mock_mqtt):
-    client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    client.send_write_command_for_device("dev1", {"cmd": 4})
-    mock_mqtt.publish.assert_called_once()
-
-
-def test_send_write_not_connected(client, mock_mqtt):
+async def test_publish_not_connected(client):
+    fake = _fake_client()
+    client._client = fake
     client._connected = False
-    client.send_write_command_for_device("dev1", {"cmd": 4})
-    mock_mqtt.publish.assert_not_called()
+    await client._publish("/topic", {"cmd": 9}, "query")
+    fake.publish.assert_not_called()
 
 
-def test_send_write_disabled(client, mock_mqtt, monkeypatch):
-    monkeypatch.setattr(mqtt_client, "DISABLE_MQTT_COMMANDS", True)
+async def test_publish_no_client(client):
+    client._client = None
     client._connected = True
-    client.send_write_command_for_device("dev1", {"cmd": 4})
-    mock_mqtt.publish.assert_not_called()
+    # No client -> nothing to publish, no error.
+    await client._publish("/topic", {"cmd": 9}, "query")
 
 
-def test_send_write_publish_failure(client, mock_mqtt):
+async def test_publish_connected_success(client):
+    fake = _fake_client()
+    client._client = fake
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    mock_mqtt.publish.return_value = MagicMock(rc=1)
-    client.send_write_command_for_device("dev1", {"cmd": 4})
-    mock_mqtt.publish.assert_called_once()
+    await client._publish("/topic", {"cmd": 9}, "query")
+    fake.publish.assert_awaited_once_with("/topic", json.dumps({"cmd": 9}))
 
 
-def test_send_write_exception(client, mock_mqtt):
+async def test_publish_mqtt_error_swallowed(client):
+    fake = _fake_client()
+    fake.publish = AsyncMock(side_effect=aiomqtt.MqttError("nope"))
+    client._client = fake
     client._connected = True
-    mock_mqtt.is_connected.return_value = True
-    mock_mqtt.publish.side_effect = Exception("boom")
-    client.send_write_command_for_device("dev1", {"cmd": 4})  # swallowed
+    # Should not raise.
+    await client._publish("/topic", {"cmd": 9}, "query")
 
 
-# --------------------------- _on_message_handler ---------------------------
+# --------------------------- _handle_message ---------------------------
 
 
-def test_on_message_valid_json(client, on_message):
-    msg = MagicMock()
-    msg.topic = "/will/dev1"
-    msg.payload = json.dumps({"a": 1}).encode()
-    client._on_message_handler(MagicMock(), None, msg)
+def test_handle_message_valid_json(client, on_message):
+    msg = _Msg("/will/dev1", json.dumps({"a": 1}).encode())
+    client._handle_message(msg)
     on_message.assert_called_once_with("/will/dev1", {"a": 1})
 
 
-def test_on_message_invalid_json_raw(client, on_message):
-    msg = MagicMock()
-    msg.topic = "/will/dev1"
-    msg.payload = b"\xff\xfenot json"
-    client._on_message_handler(MagicMock(), None, msg)
+def test_handle_message_raw_bytes_fallback(client, on_message):
+    msg = _Msg("/will/dev1", b"\xff\xfenot json")
+    client._handle_message(msg)
     on_message.assert_called_once()
     topic, payload = on_message.call_args[0]
     assert topic == "/will/dev1"

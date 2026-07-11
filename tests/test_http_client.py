@@ -1,13 +1,17 @@
-"""Tests for wybot.http_client.WyBotHTTPClient."""
+"""Tests for wybot.http_client.WyBotHTTPClient (async aiohttp API)."""
 
-from unittest.mock import MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
-import requests
 
 from wybot import http_client
 from wybot.exceptions import WybotAuthError, WybotConnectionError
 from wybot.http_client import TOKEN_REFRESH_INTERVAL, WyBotHTTPClient
+
+
+# --------------------------- JSON payload builders ---------------------------
 
 
 def _login_json(user_id="u-1", token="tok"):
@@ -37,161 +41,193 @@ def _devices_json(groups=None):
     }
 
 
-def _resp(status_code=200, json_data=None, text=""):
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_data
-    resp.text = text
-    return resp
+# --------------------------- aiohttp mocking helpers ---------------------------
+
+
+def _resp(status=200, json_data=None, text=""):
+    """Build a fake aiohttp response object."""
+    r = MagicMock()
+    r.status = status
+    r.json = AsyncMock(return_value=json_data if json_data is not None else {})
+    r.text = AsyncMock(return_value=text)
+    return r
+
+
+def _ctx(resp=None, exc=None):
+    """Build a fake ``async with`` context manager around a response."""
+    cm = MagicMock()
+    cm.__aenter__ = (
+        AsyncMock(return_value=resp) if exc is None else AsyncMock(side_effect=exc)
+    )
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _make_session():
+    """Return a MagicMock aiohttp session with post/get as plain MagicMocks."""
+    s = MagicMock()
+    s.post = MagicMock()
+    s.get = MagicMock()
+    return s
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    """Patch time.sleep so retries do not actually wait."""
-    monkeypatch.setattr(http_client.time, "sleep", lambda *_a, **_k: None)
+    """Patch asyncio.sleep so retries do not actually wait."""
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
 
 
 @pytest.fixture
-def client():
-    c = WyBotHTTPClient("user", "pass")
-    c._session = MagicMock()
-    return c
+def session():
+    return _make_session()
 
 
-# --------------------------- authenticate ---------------------------
-
-
-def test_authenticate_success(client):
-    client._session.post.return_value = _resp(200, _login_json("u-1", "tok"))
-    assert client.authenticate() is True
-    assert client.user_id == "u-1"
-    assert client._token == "tok"
-    assert client._token_obtained_at > 0
-
-
-def test_authenticate_metadata_none_raises(client):
-    client._session.post.return_value = _resp(
-        200, {"code": 1, "reason": "bad", "message": "", "metadata": None}
-    )
-    with pytest.raises(WybotAuthError):
-        client.authenticate()
-
-
-def test_authenticate_401_raises(client):
-    client._session.post.return_value = _resp(401, text="nope")
-    with pytest.raises(WybotAuthError):
-        client.authenticate()
-
-
-def test_authenticate_403_raises(client):
-    client._session.post.return_value = _resp(403, text="forbidden")
-    with pytest.raises(WybotAuthError):
-        client.authenticate()
-
-
-def test_authenticate_missing_password_raises():
-    c = WyBotHTTPClient("user", "")
-    c._session = MagicMock()
-    with pytest.raises(WybotAuthError):
-        c.authenticate()
-
-
-def test_authenticate_timeout_all_retries_raises_connection(client):
-    client._session.post.side_effect = requests.exceptions.Timeout("slow")
-    with pytest.raises(WybotConnectionError):
-        client.authenticate()
-    assert client._session.post.call_count == http_client.MAX_RETRIES
-
-
-def test_authenticate_request_exception_all_retries(client):
-    client._session.post.side_effect = requests.exceptions.RequestException("boom")
-    with pytest.raises(WybotConnectionError):
-        client.authenticate()
-
-
-def test_authenticate_500_all_retries_raises_connection(client):
-    client._session.post.return_value = _resp(500, text="server error")
-    with pytest.raises(WybotConnectionError):
-        client.authenticate()
-    assert client._session.post.call_count == http_client.MAX_RETRIES
-
-
-def test_login_unexpected_error_wrapped(client):
-    # A non-request exception is wrapped into WybotConnectionError.
-    client._session.post.side_effect = ValueError("weird")
-    with pytest.raises(WybotConnectionError):
-        client.login()
-
-
-# --------------------------- get_devices_and_status ---------------------------
+@pytest.fixture
+def client(session):
+    return WyBotHTTPClient("user", "pass", session=session)
 
 
 def _authed(client):
     client._token = "tok"
     client._user_id = "u-1"
-    client._token_obtained_at = http_client.time.time()
+    client._token_obtained_at = time.monotonic()
     return client
 
 
-def test_get_devices_success(client):
+# --------------------------- authenticate / login ---------------------------
+
+
+async def test_authenticate_success(client, session):
+    session.post.return_value = _ctx(_resp(200, _login_json("u-1", "tok")))
+    assert await client.authenticate() is True
+    assert client.user_id == "u-1"
+    assert client._token == "tok"
+    assert client._token_obtained_at > 0
+
+
+async def test_authenticate_metadata_none_raises(client, session):
+    session.post.return_value = _ctx(
+        _resp(200, {"code": 1, "reason": "bad", "message": "", "metadata": None})
+    )
+    with pytest.raises(WybotAuthError):
+        await client.authenticate()
+
+
+async def test_authenticate_401_raises(client, session):
+    session.post.return_value = _ctx(_resp(401, text="nope"))
+    with pytest.raises(WybotAuthError):
+        await client.authenticate()
+
+
+async def test_authenticate_403_raises(client, session):
+    session.post.return_value = _ctx(_resp(403, text="forbidden"))
+    with pytest.raises(WybotAuthError):
+        await client.authenticate()
+
+
+async def test_authenticate_missing_password_raises(session):
+    c = WyBotHTTPClient("user", "", session=session)
+    with pytest.raises(WybotAuthError):
+        await c.authenticate()
+
+
+async def test_login_500_all_retries_raises_connection(client, session):
+    session.post.return_value = _ctx(_resp(500, text="server error"))
+    with pytest.raises(WybotConnectionError):
+        await client.login()
+    assert session.post.call_count == http_client.MAX_RETRIES
+
+
+async def test_login_client_error_all_retries_raises_connection(client, session):
+    session.post.return_value = _ctx(exc=aiohttp.ClientError("boom"))
+    with pytest.raises(WybotConnectionError):
+        await client.login()
+    assert session.post.call_count == http_client.MAX_RETRIES
+
+
+async def test_login_timeout_all_retries_raises_connection(client, session):
+    session.post.return_value = _ctx(exc=TimeoutError("slow"))
+    with pytest.raises(WybotConnectionError):
+        await client.login()
+    assert session.post.call_count == http_client.MAX_RETRIES
+
+
+async def test_login_unexpected_error_wrapped(client, session):
+    # A non-request exception is wrapped into WybotConnectionError.
+    session.post.side_effect = ValueError("weird")
+    with pytest.raises(WybotConnectionError):
+        await client.login()
+
+
+async def test_login_500_then_success_retries(client, session):
+    session.post.side_effect = [
+        _ctx(_resp(500, text="err")),
+        _ctx(_resp(200, _login_json("u-1", "tok"))),
+    ]
+    result = await client.login()
+    assert result.metadata.token == "tok"
+    assert session.post.call_count == 2
+
+
+# --------------------------- get_devices_and_status ---------------------------
+
+
+async def test_get_devices_success(client, session):
     _authed(client)
-    client._session.get.return_value = _resp(200, _devices_json())
-    result = client.get_devices_and_status()
+    session.get.return_value = _ctx(_resp(200, _devices_json()))
+    result = await client.get_devices_and_status()
     assert result.metadata.groups == []
 
 
-def test_get_devices_401_reauth_then_success(client):
+async def test_get_devices_401_reauth_then_success(client, session):
     _authed(client)
-    client._session.get.side_effect = [
-        _resp(401, text="expired"),
-        _resp(200, _devices_json()),
+    session.get.side_effect = [
+        _ctx(_resp(401, text="expired")),
+        _ctx(_resp(200, _devices_json())),
     ]
-    client._session.post.return_value = _resp(200, _login_json("u-1", "newtok"))
-    result = client.get_devices_and_status()
+    session.post.return_value = _ctx(_resp(200, _login_json("u-1", "newtok")))
+    result = await client.get_devices_and_status()
     assert result.metadata.groups == []
     assert client._token == "newtok"
 
 
-def test_get_devices_connection_error(client):
+async def test_get_devices_connection_error(client, session):
     _authed(client)
-    client._session.get.side_effect = requests.exceptions.Timeout("slow")
+    session.get.return_value = _ctx(exc=TimeoutError("slow"))
     with pytest.raises(WybotConnectionError):
-        client.get_devices_and_status()
+        await client.get_devices_and_status()
+    assert session.get.call_count == http_client.MAX_RETRIES
 
 
-def test_get_devices_500_all_retries(client):
+async def test_get_devices_500_all_retries(client, session):
     _authed(client)
-    client._session.get.return_value = _resp(500, text="oops")
+    session.get.return_value = _ctx(_resp(500, text="oops"))
     with pytest.raises(WybotConnectionError):
-        client.get_devices_and_status()
+        await client.get_devices_and_status()
 
 
-def test_get_devices_unexpected_error_wrapped(client):
+async def test_get_devices_unexpected_error_wrapped(client, session):
     _authed(client)
-    client._session.get.side_effect = ValueError("weird")
+    session.get.side_effect = ValueError("weird")
     with pytest.raises(WybotConnectionError):
-        client.get_devices_and_status()
+        await client.get_devices_and_status()
 
 
-def test_get_devices_user_id_none_raises(client):
-    # Token present but user_id missing after refresh short-circuit is not
-    # possible; simulate by leaving refresh a no-op and clearing user id.
+async def test_get_devices_user_id_none_raises(client):
+    client._refresh_token_if_needed = AsyncMock(return_value=True)
     client._token = "tok"
-    client._user_id = "u-1"
-    client._token_obtained_at = http_client.time.time()
-    client._refresh_token_if_needed = lambda: True
     client._user_id = None
     with pytest.raises(WybotAuthError):
-        client.get_devices_and_status()
+        await client.get_devices_and_status()
 
 
 # --------------------------- indexed grouped devices ---------------------------
 
 
-def test_get_indexed_current_grouped_devices(client, sample_api_group):
+async def test_get_indexed_current_grouped_devices(client, session, sample_api_group):
     _authed(client)
-    client._session.get.return_value = _resp(200, _devices_json([sample_api_group]))
-    indexed = client.get_indexed_current_grouped_devices()
+    session.get.return_value = _ctx(_resp(200, _devices_json([sample_api_group])))
+    indexed = await client.get_indexed_current_grouped_devices()
     assert set(indexed.keys()) == {"group1"}
     assert indexed["group1"].name == "My Pool"
 
@@ -199,54 +235,97 @@ def test_get_indexed_current_grouped_devices(client, sample_api_group):
 # --------------------------- register_presence ---------------------------
 
 
-def test_register_presence_success(client):
+async def test_register_presence_success(client, session):
     _authed(client)
-    client._session.post.return_value = _resp(200)
-    assert client.register_presence() is True
+    session.post.return_value = _ctx(_resp(200))
+    assert await client.register_presence() is True
 
 
-def test_register_presence_swallows_wybot_error(client):
+async def test_register_presence_swallows_wybot_error(client):
     # No token and no password -> refresh triggers authenticate -> WybotAuthError.
     client._password = ""
     client._token = None
     client._user_id = None
-    assert client.register_presence() is False
+    assert await client.register_presence() is False
 
 
-def test_register_presence_failure_then_false(client):
+async def test_register_presence_user_id_none(client, session):
+    client._refresh_token_if_needed = AsyncMock(return_value=True)
+    client._token = "tok"
+    client._user_id = None
+    assert await client.register_presence() is False
+    session.post.assert_not_called()
+
+
+async def test_register_presence_failure_then_false(client, session):
     _authed(client)
-    client._session.post.return_value = _resp(500)
-    assert client.register_presence() is False
-    assert client._session.post.call_count == 2
+    session.post.return_value = _ctx(_resp(500))
+    assert await client.register_presence() is False
+    assert session.post.call_count == 2
 
 
-def test_register_presence_exception_returns_false(client):
+async def test_register_presence_exception_returns_false(client, session):
     _authed(client)
-    client._session.post.side_effect = Exception("boom")
-    assert client.register_presence() is False
+    session.post.side_effect = Exception("boom")
+    assert await client.register_presence() is False
 
 
 # --------------------------- _refresh_token_if_needed ---------------------------
 
 
-def test_refresh_token_missing_reauthenticates(client):
+async def test_refresh_token_missing_reauthenticates(client, session):
     client._token = None
     client._user_id = None
-    client._session.post.return_value = _resp(200, _login_json("u-9", "freshtok"))
-    assert client._refresh_token_if_needed() is True
+    session.post.return_value = _ctx(_resp(200, _login_json("u-9", "freshtok")))
+    assert await client._refresh_token_if_needed() is True
     assert client._token == "freshtok"
 
 
-def test_refresh_token_proactive_refresh(client):
+async def test_refresh_token_proactive_refresh(client, session):
     client._token = "old"
     client._user_id = "u-1"
-    client._token_obtained_at = http_client.time.time() - (TOKEN_REFRESH_INTERVAL + 100)
-    client._session.post.return_value = _resp(200, _login_json("u-1", "rotated"))
-    assert client._refresh_token_if_needed() is True
+    client._token_obtained_at = time.monotonic() - (TOKEN_REFRESH_INTERVAL + 100)
+    session.post.return_value = _ctx(_resp(200, _login_json("u-1", "rotated")))
+    assert await client._refresh_token_if_needed() is True
     assert client._token == "rotated"
 
 
-def test_refresh_token_still_valid_noop(client):
+async def test_refresh_token_still_valid_noop(client, session):
     _authed(client)
-    assert client._refresh_token_if_needed() is True
-    client._session.post.assert_not_called()
+    assert await client._refresh_token_if_needed() is True
+    session.post.assert_not_called()
+
+
+# --------------------------- session lifecycle ---------------------------
+
+
+async def test_get_session_creates_owned(monkeypatch):
+    c = WyBotHTTPClient("user", "pass")
+    fake = MagicMock()
+    monkeypatch.setattr(
+        http_client.aiohttp, "ClientSession", MagicMock(return_value=fake)
+    )
+    assert c._get_session() is fake
+    assert c._owns_session is True
+    # Subsequent calls return the same session.
+    assert c._get_session() is fake
+
+
+async def test_close_owned_session():
+    c = WyBotHTTPClient("user", "pass")
+    mock_sess = MagicMock()
+    mock_sess.close = AsyncMock()
+    c._session = mock_sess
+    c._owns_session = True
+    await c.close()
+    mock_sess.close.assert_awaited_once()
+    assert c._session is None
+
+
+async def test_close_injected_session():
+    mock_sess = MagicMock()
+    mock_sess.close = AsyncMock()
+    c = WyBotHTTPClient("user", "pass", session=mock_sess)
+    await c.close()
+    mock_sess.close.assert_not_called()
+    assert c._session is mock_sess

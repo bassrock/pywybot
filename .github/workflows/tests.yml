@@ -26,3 +26,6 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v --cov=wybot --cov-report=term-missing --cov-fail-under=95
+
+      - name: Type check
+        run: python -m mypy --strict --ignore-missing-imports src/wybot

@@ -4,8 +4,9 @@ import asyncio
 import logging
 from typing import Any
 
-from bleak import BleakClient, BleakError
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
 from .bluetooth import BluetoothAdapter
@@ -98,6 +99,18 @@ CMD_WIFI_APPLY = bytes.fromhex("aa550003000002")  # Apply configuration
 
 # Query command (binary format)
 CMD_QUERY_STATUS = bytes.fromhex("aa5500090000000a")  # cmd=9, no payload
+
+
+class DirectDevice:
+    """Lightweight BLE device stand-in used when only a MAC address is known.
+
+    Mimics the ``address``/``name`` attributes of :class:`BLEDevice` so the rest
+    of the wake/connect flow can treat it uniformly.
+    """
+
+    def __init__(self, addr: str) -> None:
+        self.address = addr
+        self.name = f"WyBot-{addr}"
 
 
 class WyBotBLEClient:
@@ -260,7 +273,7 @@ class WyBotBLEClient:
         Returns:
             Dict with service discovery information
         """
-        discovery_info = {
+        discovery_info: dict[str, Any] = {
             "services": [],
             "found_primary_service": False,
             "found_notification_char": False,
@@ -271,7 +284,7 @@ class WyBotBLEClient:
             service_uuid = str(service.uuid).lower()
             is_known = service_uuid in KNOWN_SERVICE_UUIDS
 
-            service_info = {
+            service_info: dict[str, Any] = {
                 "uuid": service_uuid,
                 "is_wybot_service": is_known,
                 "characteristics": [],
@@ -591,7 +604,7 @@ class WyBotBLEClient:
 
         try:
             # Step 1: Try to scan for the device first
-            device = await self.scan_for_device(ble_name)
+            device: BLEDevice | DirectDevice | None = await self.scan_for_device(ble_name)
 
             # If scan didn't find it, try using the BLE name as MAC address directly
             # WyBot BLE names are typically MAC addresses without colons
@@ -613,10 +626,6 @@ class WyBotBLEClient:
                         "Found device via direct MAC lookup: %s", mac_address
                     )
                     # Create a simple device-like object for the rest of the flow
-                    class DirectDevice:
-                        def __init__(self, addr):
-                            self.address = addr
-                            self.name = f"WyBot-{addr}"
                     device = DirectDevice(mac_address)
                 else:
                     _LOGGER.warning(
@@ -849,7 +858,7 @@ class WyBotBLEClient:
             )
 
             # Step 1: Find the device
-            device = await self.scan_for_device(ble_name)
+            device: BLEDevice | DirectDevice | None = await self.scan_for_device(ble_name)
 
             if not device:
                 _LOGGER.info(
@@ -870,11 +879,6 @@ class WyBotBLEClient:
                 ble_device = self._adapter.device_from_address(mac_address)
                 if ble_device:
                     _LOGGER.info("Found device via direct MAC lookup: %s", mac_address)
-
-                    class DirectDevice:
-                        def __init__(self, addr: str) -> None:
-                            self.address = addr
-                            self.name = f"WyBot-{addr}"
 
                     device = DirectDevice(mac_address)
                 else:
@@ -995,7 +999,7 @@ class WyBotBLEClient:
             dp_value=dp_value,
         )
 
-    async def send_command(self, ble_name: str, dp: GenericDP) -> tuple[bool, list[dict] | None]:
+    async def send_command(self, ble_name: str, dp: GenericDP) -> tuple[bool, list[dict[str, Any]] | None]:
         """Send a command to a WyBot device via BLE.
 
         Uses binary AA55 format (verified working via PacketLogger capture).
@@ -1028,7 +1032,7 @@ class WyBotBLEClient:
             )
 
             # Step 1: Find the device
-            device = await self.scan_for_device(ble_name)
+            device: BLEDevice | DirectDevice | None = await self.scan_for_device(ble_name)
 
             if not device:
                 _LOGGER.info(
@@ -1048,11 +1052,6 @@ class WyBotBLEClient:
                 ble_device = self._adapter.device_from_address(mac_address)
                 if ble_device:
                     _LOGGER.info("Found device via MAC: %s", mac_address)
-
-                    class DirectDevice:
-                        def __init__(self, addr: str) -> None:
-                            self.address = addr
-                            self.name = f"WyBot-{addr}"
 
                     device = DirectDevice(mac_address)
                 else:
@@ -1150,7 +1149,7 @@ class WyBotBLEClient:
         # Check for aa55 header and cmd=0x05 (status)
         return data[:2] == b"\xaa\x55" and data[3] == 0x05
 
-    def _parse_ble_response(self, data: bytes) -> list[dict]:
+    def _parse_ble_response(self, data: bytes) -> list[dict[str, Any]]:
         """Parse BLE response containing DP data.
 
         WyBot BLE response format (verified via live testing):
@@ -1167,7 +1166,7 @@ class WyBotBLEClient:
         Returns:
             List of DP dicts: [{"id": int, "type": int, "len": int, "data": str}, ...]
         """
-        dps = []
+        dps: list[dict[str, Any]] = []
 
         if len(data) < 7:
             return dps
@@ -1243,7 +1242,7 @@ class WyBotBLEClient:
 
         return dps
 
-    async def query_status(self, ble_name: str) -> list[dict] | None:
+    async def query_status(self, ble_name: str) -> list[dict[str, Any]] | None:
         """Query device status via BLE.
 
         Sends a query command and parses the response to get current DP values.
@@ -1265,7 +1264,7 @@ class WyBotBLEClient:
             _LOGGER.info("BLE status query for device %s", ble_name)
 
             # Find the device
-            device = await self.scan_for_device(ble_name)
+            device: BLEDevice | DirectDevice | None = await self.scan_for_device(ble_name)
             if not device:
                 # Try direct MAC
                 if len(ble_name) == 12 and all(c in "0123456789ABCDEFabcdef" for c in ble_name):
@@ -1279,10 +1278,6 @@ class WyBotBLEClient:
                         _LOGGER.warning("Device %s not found for status query", ble_name)
                     return None
 
-                class DirectDevice:
-                    def __init__(self, addr: str) -> None:
-                        self.address = addr
-                        self.name = f"WyBot-{addr}"
                 device = DirectDevice(mac_address)
 
             try:
@@ -1318,7 +1313,7 @@ class WyBotBLEClient:
                         # Wait for status broadcast (cmd=0x05)
                         # The notification handler stores cmd=0x05 in _last_status_data
                         # so ACKs (cmd=0x1c) don't overwrite it
-                        dps = []
+                        dps: list[dict[str, Any]] = []
                         max_wait_time = 5.0  # Max seconds to wait for status
                         poll_interval = 0.3  # Check every 300ms
                         elapsed = 0.0

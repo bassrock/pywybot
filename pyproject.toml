@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pywybot"
-version = "0.1.0"
+version = "1.0.0"
 description = "Python client library for WyBot pool robots (HTTP, MQTT, and BLE)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,15 +22,15 @@ classifiers = [
   "Topic :: Home Automation",
 ]
 dependencies = [
+  "aiohttp>=3.9",
+  "aiomqtt>=2.0",
   "bleak>=0.21",
   "bleak-retry-connector>=3.0",
-  "paho-mqtt>=1.6",
   "pydantic>=2.0",
-  "requests>=2.28",
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio", "pytest-cov"]
+test = ["pytest", "pytest-asyncio", "pytest-cov", "mypy"]
 
 [project.urls]
 Homepage = "https://github.com/bassrock/pywybot"

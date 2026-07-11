@@ -21,20 +21,26 @@ pip install pywybot
 
 ## Usage
 
+The client is fully async (aiohttp / aiomqtt).
+
 ### Cloud (HTTP)
 
 ```python
+import aiohttp
 from wybot import WyBotHTTPClient, WybotAuthError, WybotConnectionError
 
-client = WyBotHTTPClient("you@example.com", "password")
-try:
-    client.authenticate()
-except WybotAuthError:
-    ...  # invalid credentials
-except WybotConnectionError:
-    ...  # network/server error
+async with aiohttp.ClientSession() as session:
+    # Pass a session to reuse it (e.g. Home Assistant's shared session);
+    # omit it and the client creates and owns one (call await client.close()).
+    client = WyBotHTTPClient("you@example.com", "password", session=session)
+    try:
+        await client.authenticate()
+    except WybotAuthError:
+        ...  # invalid credentials
+    except WybotConnectionError:
+        ...  # network/server error
 
-groups = client.get_indexed_current_grouped_devices()
+    groups = await client.get_indexed_current_grouped_devices()
 ```
 
 The HTTP client raises `WybotAuthError` for rejected credentials and

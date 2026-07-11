@@ -1,5 +1,6 @@
 from enum import Enum
 import logging
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -40,14 +41,14 @@ class GenericDP:
             self.len = data.len
         self.data = data.data
 
-    def dict(self) -> dict:
+    def dict(self) -> dict[str, Any]:
         return {"id": self.id, "type": self.type, "len": self.len, "data": self.data}
 
-    def __str__(self):
-        return f"({__class__.__name__}, value={self.dict()})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, value={self.dict()})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, value={self.dict()})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, value={self.dict()})"
 
 
 class CleaningStatusMode(Enum):
@@ -79,14 +80,14 @@ class CleaningStatus(GenericDP):
         return CleaningStatusMode(int(self.data, 16))
 
     @status.setter
-    def status(self, data: CleaningStatusMode):
+    def status(self, data: CleaningStatusMode) -> None:
         self.data = f"{int(data.value):02x}"
 
-    def __str__(self):
-        return f"({__class__.__name__}, status={self.status})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, status={self.status})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, status={self.status})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, status={self.status})"
 
 
 class DockStatus(Enum):
@@ -115,14 +116,14 @@ class Dock(GenericDP):
         return DockStatus(int(self.data[-2:], 16))
 
     @status.setter
-    def status(self, data: DockStatus):
+    def status(self, data: DockStatus) -> None:
         self.data = f"{int(data.value):02x}"
 
-    def __str__(self):
-        return f"({__class__.__name__}, status={self.data})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, status={self.data})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, status={self.data})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, status={self.data})"
 
 
 class CleaningMode(GenericDP):
@@ -152,14 +153,14 @@ class CleaningMode(GenericDP):
         return self.CLEANING_MODES[int(self.data, 16)]
 
     @cleaning_mode.setter
-    def cleaning_mode(self, data: str):
+    def cleaning_mode(self, data: str) -> None:
         self.data = f"{self.CLEANING_MODES.index(data):02x}"
 
-    def __str__(self):
-        return f"({__class__.__name__}, mode={self.cleaning_mode})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, mode={self.cleaning_mode})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, mode={self.cleaning_mode})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, mode={self.cleaning_mode})"
 
 
 class BatteryState(Enum):
@@ -186,11 +187,11 @@ class Battery(GenericDP):
             return BatteryState.NOT_PLUGGED_IN
         return BatteryState(int(self.data[:2], 16))
 
-    def __str__(self):
-        return f"({__class__.__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
 
 
 class SolarEnergyHarvested(GenericDP):
@@ -216,11 +217,11 @@ class SolarEnergyHarvested(GenericDP):
         """Return total solar energy harvested in kWh."""
         return self.energy_wh / 1000.0
 
-    def __str__(self):
-        return f"({__class__.__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
 
 
 class SolarDockBattery(GenericDP):
@@ -253,11 +254,11 @@ class SolarDockBattery(GenericDP):
         except (ValueError, IndexError):
             return 0
 
-    def __str__(self):
-        return f"({__class__.__name__}, battery_level={self.battery_level}%)"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, battery_level={self.battery_level}%)"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, battery_level={self.battery_level}%)"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, battery_level={self.battery_level}%)"
 
 
 class SolarStatusMode(Enum):
@@ -291,11 +292,11 @@ class SolarStatus(GenericDP):
             return SolarStatusMode.NOT_CHARGING
         return SolarStatusMode(int(self.data, 16))
 
-    def __str__(self):
-        return f"({__class__.__name__}, is_charging={self.is_charging})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, is_charging={self.is_charging})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, is_charging={self.is_charging})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, is_charging={self.is_charging})"
 
 
 class DockType(Enum):
@@ -331,11 +332,11 @@ class DockInfo(GenericDP):
         """Return True if this is a solar dock."""
         return self.dock_type == DockType.SOLAR
 
-    def __str__(self):
-        return f"({__class__.__name__}, dock_type={self.dock_type}, is_solar_dock={self.is_solar_dock})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, dock_type={self.dock_type}, is_solar_dock={self.is_solar_dock})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, dock_type={self.dock_type}, is_solar_dock={self.is_solar_dock})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, dock_type={self.dock_type}, is_solar_dock={self.is_solar_dock})"
 
 
 class Schedule(GenericDP):
@@ -353,11 +354,11 @@ class Schedule(GenericDP):
         """Return raw schedule data as hex string."""
         return self.data if self.data else ""
 
-    def __str__(self):
-        return f"({__class__.__name__}, raw_schedule={self.raw_schedule})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, raw_schedule={self.raw_schedule})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, raw_schedule={self.raw_schedule})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, raw_schedule={self.raw_schedule})"
 
 
 class DeviceStatus(GenericDP):
@@ -377,11 +378,11 @@ class DeviceStatus(GenericDP):
             return 0
         return int(self.data, 16)
 
-    def __str__(self):
-        return f"({__class__.__name__}, status_value={self.status_value})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, status_value={self.status_value})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, status_value={self.status_value})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, status_value={self.status_value})"
 
 
 class ConnectionStatus(GenericDP):
@@ -401,11 +402,11 @@ class ConnectionStatus(GenericDP):
             return False
         return int(self.data, 16) == 1
 
-    def __str__(self):
-        return f"({__class__.__name__}, is_connected={self.is_connected})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, is_connected={self.is_connected})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, is_connected={self.is_connected})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, is_connected={self.is_connected})"
 
 
 class DockConnectionStatus(GenericDP):
@@ -425,11 +426,11 @@ class DockConnectionStatus(GenericDP):
             return False
         return int(self.data, 16) == 1
 
-    def __str__(self):
-        return f"({__class__.__name__}, is_docked={self.is_docked})"
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, is_docked={self.is_docked})"
 
-    def __repr__(self):
-        return f"({__class__.__name__}, is_docked={self.is_docked})"
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, is_docked={self.is_docked})"
 
 
 # Mapping of types to classes
