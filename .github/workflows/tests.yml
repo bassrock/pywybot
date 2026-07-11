@@ -25,4 +25,4 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run tests
-        run: python -m pytest tests/ -v --cov=wybot --cov-report=term-missing
+        run: python -m pytest tests/ -v --cov=wybot --cov-report=term-missing --cov-fail-under=95
