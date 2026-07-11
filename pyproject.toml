@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-cov"]
+test = ["pytest", "pytest-asyncio", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/bassrock/pywybot"
@@ -44,3 +44,4 @@ wybot = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
