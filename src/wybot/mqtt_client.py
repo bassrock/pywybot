@@ -45,15 +45,35 @@ class WyBotMQTTClient:
         self._client: aiomqtt.Client | None = None
         self._task: asyncio.Task[None] | None = None
         self._connected: bool = False
+        self._connected_event = asyncio.Event()
         self._stop: bool = False
         self._identifier = f"wybot-{uuid.uuid4()}"
 
-    async def connect(self) -> None:
-        """Start the background connection/reconnection task (idempotent)."""
-        if self._task is not None and not self._task.done():
-            return
-        self._stop = False
-        self._task = asyncio.create_task(self._run())
+    async def connect(self, timeout: float = 10.0) -> bool:
+        """Start the connection task and wait for it to come up.
+
+        ``connect()`` schedules a background task that owns the connection and
+        reconnects with backoff. It waits up to ``timeout`` seconds for the
+        first successful connection so callers can rely on the return value
+        instead of racing the background task.
+
+        Args:
+            timeout: Seconds to wait for the initial connection.
+
+        Returns:
+            True if the client is connected within ``timeout``, else False.
+        """
+        if self._task is None or self._task.done():
+            self._stop = False
+            self._connected_event.clear()
+            self._task = asyncio.create_task(self._run())
+        if self._connected:
+            return True
+        try:
+            await asyncio.wait_for(self._connected_event.wait(), timeout)
+        except TimeoutError:
+            return False
+        return True
 
     async def _run(self) -> None:
         """Maintain the MQTT connection, reconnecting with backoff."""
@@ -69,6 +89,7 @@ class WyBotMQTTClient:
                 ) as client:
                     self._client = client
                     self._connected = True
+                    self._connected_event.set()
                     delay = INITIAL_RECONNECT_DELAY
                     _LOGGER.info("MQTT connected successfully")
                     # Re-subscribe and re-request statuses on (re)connect.
@@ -88,6 +109,7 @@ class WyBotMQTTClient:
                 _LOGGER.error("Unexpected MQTT error: %s; reconnecting", err)
             finally:
                 self._connected = False
+                self._connected_event.clear()
                 self._client = None
             if self._stop:
                 break
@@ -147,32 +169,47 @@ class WyBotMQTTClient:
 
     async def send_query_command_for_device(
         self, device_id: str, command: dict[str, Any]
-    ) -> None:
-        """Send a query command to a device."""
-        await self._publish(
+    ) -> bool:
+        """Send a query command to a device.
+
+        Returns True if the command was published, False if it was dropped
+        (client disconnected or the publish failed).
+        """
+        return await self._publish(
             f"/device/DATA/recv_transparent_query_data/{device_id}", command, "query"
         )
 
     async def send_write_command_for_device(
         self, device_id: str, command: dict[str, Any]
-    ) -> None:
-        """Send a write command to a device."""
-        await self._publish(
+    ) -> bool:
+        """Send a write command to a device.
+
+        Returns True if the command was published, False if it was dropped
+        (client disconnected or the publish failed).
+        """
+        return await self._publish(
             f"/device/DATA/recv_transparent_cmd_data/{device_id}", command, "write"
         )
 
-    async def _publish(self, topic: str, command: dict[str, Any], kind: str) -> None:
-        """Publish a JSON command to a topic if connected."""
+    async def _publish(self, topic: str, command: dict[str, Any], kind: str) -> bool:
+        """Publish a JSON command to a topic if connected.
+
+        Returns True if the message was handed to the broker, False if it was
+        dropped because commands are disabled, the client is not connected, or
+        the underlying publish raised.
+        """
         if DISABLE_MQTT_COMMANDS:
             _LOGGER.debug("MQTT commands disabled, skipping %s: %s", kind, command)
-            return
+            return False
         if not self.is_connected() or self._client is None:
             _LOGGER.debug("Not connected, cannot send %s command", kind)
-            return
+            return False
         try:
             await self._client.publish(topic, json.dumps(command))
         except aiomqtt.MqttError as err:
             _LOGGER.error("Failed to publish %s command: %s", kind, err)
+            return False
+        return True
 
     def _handle_message(self, message: aiomqtt.Message) -> None:
         """Handle an incoming message from the MQTT server."""

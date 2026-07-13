@@ -168,8 +168,29 @@ async def test_connect_idempotent_when_task_running(client):
     fake_task = MagicMock()
     fake_task.done.return_value = False
     client._task = fake_task
-    await client.connect()
+    client._connected = True  # already up: connect returns immediately
+    assert await client.connect() is True
     assert client._task is fake_task  # no new task created
+
+
+async def test_connect_waits_for_connection(client, monkeypatch):
+    # _run sets the event once "connected"; connect() must wait for it.
+    async def _fake_run():
+        client._connected = True
+        client._connected_event.set()
+
+    monkeypatch.setattr(client, "_run", _fake_run)
+    assert await client.connect(timeout=5) is True
+    assert client.is_connected() is True
+
+
+async def test_connect_times_out_when_never_connects(client, monkeypatch):
+    async def _never():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_run", _never)
+    assert await client.connect(timeout=0.05) is False
+    await client.disconnect()
 
 
 async def test_disconnect_cancels_task(client):
@@ -254,7 +275,7 @@ async def test_send_query_connected_success(client):
     fake = _fake_client()
     client._client = fake
     client._connected = True
-    await client.send_query_command_for_device("dev1", {"cmd": 9})
+    assert await client.send_query_command_for_device("dev1", {"cmd": 9}) is True
     fake.publish.assert_awaited_once()
     topic, _payload = fake.publish.await_args[0]
     assert topic == "/device/DATA/recv_transparent_query_data/dev1"
@@ -264,10 +285,17 @@ async def test_send_write_connected_success(client):
     fake = _fake_client()
     client._client = fake
     client._connected = True
-    await client.send_write_command_for_device("dev1", {"cmd": 4})
+    assert await client.send_write_command_for_device("dev1", {"cmd": 4}) is True
     fake.publish.assert_awaited_once()
     topic, _payload = fake.publish.await_args[0]
     assert topic == "/device/DATA/recv_transparent_cmd_data/dev1"
+
+
+async def test_send_write_disconnected_reports_failure(client):
+    # Disconnected: nothing published and the caller learns the command dropped.
+    client._client = None
+    client._connected = False
+    assert await client.send_write_command_for_device("dev1", {"cmd": 4}) is False
 
 
 # --------------------------- _publish ---------------------------
@@ -278,7 +306,7 @@ async def test_publish_disabled(client, monkeypatch):
     fake = _fake_client()
     client._client = fake
     client._connected = True
-    await client._publish("/topic", {"cmd": 9}, "query")
+    assert await client._publish("/topic", {"cmd": 9}, "query") is False
     fake.publish.assert_not_called()
 
 
@@ -286,7 +314,7 @@ async def test_publish_not_connected(client):
     fake = _fake_client()
     client._client = fake
     client._connected = False
-    await client._publish("/topic", {"cmd": 9}, "query")
+    assert await client._publish("/topic", {"cmd": 9}, "query") is False
     fake.publish.assert_not_called()
 
 
@@ -294,14 +322,14 @@ async def test_publish_no_client(client):
     client._client = None
     client._connected = True
     # No client -> nothing to publish, no error.
-    await client._publish("/topic", {"cmd": 9}, "query")
+    assert await client._publish("/topic", {"cmd": 9}, "query") is False
 
 
 async def test_publish_connected_success(client):
     fake = _fake_client()
     client._client = fake
     client._connected = True
-    await client._publish("/topic", {"cmd": 9}, "query")
+    assert await client._publish("/topic", {"cmd": 9}, "query") is True
     fake.publish.assert_awaited_once_with("/topic", json.dumps({"cmd": 9}))
 
 
@@ -310,8 +338,8 @@ async def test_publish_mqtt_error_swallowed(client):
     fake.publish = AsyncMock(side_effect=aiomqtt.MqttError("nope"))
     client._client = fake
     client._connected = True
-    # Should not raise.
-    await client._publish("/topic", {"cmd": 9}, "query")
+    # Should not raise, and reports failure.
+    assert await client._publish("/topic", {"cmd": 9}, "query") is False
 
 
 # --------------------------- _handle_message ---------------------------
