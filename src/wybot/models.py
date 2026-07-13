@@ -1,6 +1,8 @@
 """Provides response models for the Wybot HTTP and MQTT API."""
 
-from typing import Annotated, TypeVar
+from dataclasses import dataclass
+from enum import Enum
+from typing import Annotated, Any, TypeVar
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -40,6 +42,37 @@ class Command(BaseModel):
         alias_generator=to_snake_case,
         populate_by_name=True,
     )
+
+
+class MQTTMessageKind(str, Enum):
+    """The semantic kind of a parsed MQTT message.
+
+    This lets consumers react to what a message *means* without needing to know
+    the WyBot broker's raw topic layout.
+    """
+
+    WILL = "will"  # device online/offline status (/will/)
+    DATA_REPORT = "data_report"  # device-pushed data (send_transparent_data)
+    QUERY_RESPONSE = "query_response"  # response to a status query
+    COMMAND_RESPONSE = "command_response"  # response/echo on the command topic
+    OTHER = "other"  # any other subscribed topic (e.g. OTA)
+
+
+@dataclass
+class MQTTMessage:
+    """A parsed MQTT message from the WyBot broker.
+
+    pywybot owns the topic layout and payload parsing, so consumers receive the
+    device id, a semantic ``kind``, and (where applicable) the online flag or a
+    parsed ``Command`` instead of a raw topic string and untyped payload.
+    """
+
+    topic: str
+    kind: MQTTMessageKind
+    device_id: str | None = None
+    online: bool | None = None
+    command: Command | None = None
+    payload: Any = None
 
 
 class LoginMetadata(BaseModel):

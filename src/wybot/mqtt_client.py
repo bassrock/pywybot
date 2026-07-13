@@ -12,9 +12,21 @@ import uuid
 
 import aiomqtt
 
+from .models import Command, MQTTMessage, MQTTMessageKind
+
 _LOGGER = logging.getLogger(__name__)
 
 MQTT_URL = "mqtt.wybotpool.com"
+
+# Prefixes of the subscribed topics, mapped to the semantic message kind. The
+# broker's topic layout is protocol detail owned here so consumers only deal
+# with parsed MQTTMessage events.
+_TOPIC_KINDS: tuple[tuple[str, MQTTMessageKind], ...] = (
+    ("/will/", MQTTMessageKind.WILL),
+    ("/device/DATA/send_transparent_data/", MQTTMessageKind.DATA_REPORT),
+    ("/device/DATA/recv_transparent_query_data/", MQTTMessageKind.QUERY_RESPONSE),
+    ("/device/DATA/recv_transparent_cmd_data/", MQTTMessageKind.COMMAND_RESPONSE),
+)
 
 # User/Password to authenticate from the iOS/Android app to the MQTT server.
 # These are hardcoded to the same value for every user in the mobile apps.
@@ -32,12 +44,14 @@ DISABLE_MQTT_COMMANDS = False
 class WyBotMQTTClient:
     """Async client for interacting with the WyBot MQTT API."""
 
-    def __init__(self, on_message: Callable[[str, Any], None]) -> None:
+    def __init__(self, on_message: Callable[[MQTTMessage], None]) -> None:
         """Initialize the WyBot MQTT client.
 
         Args:
-            on_message: Callback invoked with ``(topic, payload)`` for each
-                message received (payload is a parsed dict or the raw bytes).
+            on_message: Callback invoked with a parsed :class:`MQTTMessage` for
+                each message received. The client owns the topic layout and
+                payload parsing, so the callback gets the device id, a semantic
+                kind, and (where applicable) the online flag or parsed command.
         """
         self._on_message = on_message
         self._subscriptions: set[str] = set()
@@ -217,4 +231,44 @@ class WyBotMQTTClient:
             payload: Any = json.loads(message.payload)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             payload = message.payload
-        self._on_message(str(message.topic), payload)
+        self._on_message(self._parse_message(str(message.topic), payload))
+
+    def _parse_message(self, topic: str, payload: Any) -> MQTTMessage:
+        """Parse a raw topic and payload into a semantic :class:`MQTTMessage`.
+
+        Non-JSON payloads (the raw bytes forwarded when decoding fails) yield a
+        message with ``online``/``command`` left unset so a malformed frame can
+        never crash the receive loop.
+        """
+        data = payload if isinstance(payload, dict) else None
+        for prefix, kind in _TOPIC_KINDS:
+            if topic.startswith(prefix):
+                device_id = topic[len(prefix) :]
+                if kind is MQTTMessageKind.WILL:
+                    online = data.get("online") == "1" if data is not None else None
+                    return MQTTMessage(
+                        topic=topic,
+                        kind=kind,
+                        device_id=device_id,
+                        online=online,
+                        payload=payload,
+                    )
+                return MQTTMessage(
+                    topic=topic,
+                    kind=kind,
+                    device_id=device_id,
+                    command=self._parse_command(data, topic),
+                    payload=payload,
+                )
+        return MQTTMessage(topic=topic, kind=MQTTMessageKind.OTHER, payload=payload)
+
+    @staticmethod
+    def _parse_command(data: dict[str, Any] | None, topic: str) -> Command | None:
+        """Parse a command payload, returning None on malformed data."""
+        if data is None:
+            return None
+        try:
+            return Command(**data)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to parse command on %s: %s (%s)", topic, data, err)
+            return None

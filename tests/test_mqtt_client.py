@@ -8,7 +8,73 @@ import aiomqtt
 import pytest
 
 from wybot import mqtt_client
+from wybot.models import MQTTMessageKind
 from wybot.mqtt_client import WyBotMQTTClient
+
+
+# --------------------------- _parse_message ---------------------------
+
+
+def test_parse_will_online(client):
+    msg = client._parse_message("/will/dev1", {"online": "1"})
+    assert msg.kind is MQTTMessageKind.WILL
+    assert msg.device_id == "dev1"
+    assert msg.online is True
+
+
+def test_parse_will_offline(client):
+    msg = client._parse_message("/will/dev1", {"online": "0"})
+    assert msg.kind is MQTTMessageKind.WILL
+    assert msg.online is False
+
+
+def test_parse_data_report_parses_command(client):
+    payload = {"cmd": 4, "ts": 1, "dp": [{"id": 11, "type": 4, "len": 1, "data": "00"}]}
+    msg = client._parse_message(
+        "/device/DATA/send_transparent_data/dev1", payload
+    )
+    assert msg.kind is MQTTMessageKind.DATA_REPORT
+    assert msg.device_id == "dev1"
+    assert msg.command is not None
+    assert msg.command.cmd == 4
+
+
+def test_parse_command_response(client):
+    payload = {"cmd": 4, "ts": 1, "dp": []}
+    msg = client._parse_message(
+        "/device/DATA/recv_transparent_cmd_data/dev1", payload
+    )
+    assert msg.kind is MQTTMessageKind.COMMAND_RESPONSE
+    assert msg.command is not None
+
+
+def test_parse_query_response(client):
+    msg = client._parse_message(
+        "/device/DATA/recv_transparent_query_data/dev1",
+        {"cmd": 9, "ts": 1, "dp": []},
+    )
+    assert msg.kind is MQTTMessageKind.QUERY_RESPONSE
+
+
+def test_parse_malformed_command_is_none(client):
+    # Not a valid Command payload -> command stays None, no raise.
+    msg = client._parse_message(
+        "/device/DATA/send_transparent_data/dev1", {"bogus": True}
+    )
+    assert msg.command is None
+
+
+def test_parse_non_dict_payload(client):
+    # Raw bytes forwarded when JSON decoding failed.
+    msg = client._parse_message("/will/dev1", b"not json")
+    assert msg.kind is MQTTMessageKind.WILL
+    assert msg.online is None
+
+
+def test_parse_other_topic(client):
+    msg = client._parse_message("/device/OTA/post_update_progress/dev1", {})
+    assert msg.kind is MQTTMessageKind.OTHER
+    assert msg.device_id is None
 
 
 # --------------------------- fake aiomqtt helpers ---------------------------
@@ -79,8 +145,8 @@ async def test_run_connects_subscribes_and_handles_message(monkeypatch):
     received = []
     holder = {}
 
-    def on_message(topic, payload):
-        received.append((topic, payload))
+    def on_message(msg):
+        received.append(msg)
         holder["client"]._stop = True
 
     c = WyBotMQTTClient(on_message)
@@ -95,7 +161,10 @@ async def test_run_connects_subscribes_and_handles_message(monkeypatch):
     await c.connect()
     await asyncio.wait_for(c._task, timeout=5)
 
-    assert received == [("/will/dev1", {"a": 1})]
+    assert len(received) == 1
+    assert received[0].kind is MQTTMessageKind.WILL
+    assert received[0].device_id == "dev1"
+    assert received[0].payload == {"a": 1}
     # Re-subscribed to the one stored subscription on (re)connect.
     assert fake.subscribe.await_count == 1
     # ensure_device_sends_statuses publishes 15 query DPs for the device.
@@ -107,8 +176,8 @@ async def test_run_reconnects_on_mqtt_error(monkeypatch, _no_sleep):
     received = []
     holder = {}
 
-    def on_message(topic, payload):
-        received.append((topic, payload))
+    def on_message(msg):
+        received.append(msg)
         holder["client"]._stop = True
 
     c = WyBotMQTTClient(on_message)
@@ -128,7 +197,9 @@ async def test_run_reconnects_on_mqtt_error(monkeypatch, _no_sleep):
     await c.connect()
     await asyncio.wait_for(c._task, timeout=5)
 
-    assert received == [("/will/dev1", {})]
+    assert len(received) == 1
+    assert received[0].kind is MQTTMessageKind.WILL
+    assert received[0].device_id == "dev1"
     _no_sleep.assert_awaited()  # backoff sleep happened between attempts
 
 
@@ -136,8 +207,8 @@ async def test_run_reconnects_on_generic_error(monkeypatch, _no_sleep):
     received = []
     holder = {}
 
-    def on_message(topic, payload):
-        received.append((topic, payload))
+    def on_message(msg):
+        received.append(msg)
         holder["client"]._stop = True
 
     c = WyBotMQTTClient(on_message)
@@ -157,7 +228,8 @@ async def test_run_reconnects_on_generic_error(monkeypatch, _no_sleep):
     await c.connect()
     await asyncio.wait_for(c._task, timeout=5)
 
-    assert received == [("/t", {})]
+    assert len(received) == 1
+    assert received[0].kind is MQTTMessageKind.OTHER
     _no_sleep.assert_awaited()
 
 
@@ -346,15 +418,21 @@ async def test_publish_mqtt_error_swallowed(client):
 
 
 def test_handle_message_valid_json(client, on_message):
-    msg = _Msg("/will/dev1", json.dumps({"a": 1}).encode())
+    msg = _Msg("/will/dev1", json.dumps({"online": "1"}).encode())
     client._handle_message(msg)
-    on_message.assert_called_once_with("/will/dev1", {"a": 1})
+    on_message.assert_called_once()
+    parsed = on_message.call_args[0][0]
+    assert parsed.kind is MQTTMessageKind.WILL
+    assert parsed.device_id == "dev1"
+    assert parsed.online is True
+    assert parsed.payload == {"online": "1"}
 
 
 def test_handle_message_raw_bytes_fallback(client, on_message):
     msg = _Msg("/will/dev1", b"\xff\xfenot json")
     client._handle_message(msg)
     on_message.assert_called_once()
-    topic, payload = on_message.call_args[0]
-    assert topic == "/will/dev1"
-    assert payload == msg.payload
+    parsed = on_message.call_args[0][0]
+    assert parsed.kind is MQTTMessageKind.WILL
+    assert parsed.online is None
+    assert parsed.payload == msg.payload

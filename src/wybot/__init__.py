@@ -12,12 +12,15 @@ from .ble_client import WyBotBLEClient
 from .bluetooth import BluetoothAdapter
 from .exceptions import WybotAuthError, WybotConnectionError, WybotError
 from .http_client import WyBotHTTPClient
+from .models import MQTTMessage, MQTTMessageKind
 from .mqtt_client import WyBotMQTTClient
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "BluetoothAdapter",
+    "MQTTMessage",
+    "MQTTMessageKind",
     "WyBotBLEClient",
     "WyBotHTTPClient",
     "WyBotMQTTClient",
