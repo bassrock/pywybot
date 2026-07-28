@@ -55,8 +55,9 @@ class TestReprMethods:
 
     def test_solar_energy_str_and_repr(self):
         solar = SolarEnergyHarvested(DP(id=131, type=2, len=4, data="e8030000"))
-        assert "energy_wh=1000" in str(solar)
-        assert "energy_kwh=1.0" in repr(solar)
+        # WorkingTime.__str__ shows seconds= now (was energy_wh=)
+        assert "seconds=1000" in str(solar)
+        assert "seconds=1000" in repr(solar)
 
     def test_solar_dock_battery_str_and_repr(self):
         bat = SolarDockBattery(DP(id=221, type=0, len=3, data="01480a"))

@@ -25,6 +25,20 @@ def sample_dp_data():
         "dock_info_solar": {"id": 214, "type": 4, "len": 1, "data": "05"},
         "dock_connection_docked": {"id": 213, "type": 4, "len": 1, "data": "01"},
         "dock_connection_undocked": {"id": 213, "type": 4, "len": 1, "data": "00"},
+        # F1-specific fixtures
+        "f1_battery_charging": {"id": 50, "type": 0, "len": 3, "data": "016302"},
+        "f1_battery_charged": {"id": 50, "type": 0, "len": 3, "data": "026402"},
+        "f1_battery_not_plugged": {"id": 50, "type": 0, "len": 3, "data": "000e01"},
+        "f1_cleaning_mode_smart": {"id": 1, "type": 4, "len": 1, "data": "0e"},
+        "f1_cleaning_mode_standard": {"id": 1, "type": 4, "len": 1, "data": "0f"},
+        "f1_auto_run_enabled": {"id": 207, "type": 4, "len": 1, "data": "01"},
+        "f1_auto_run_disabled": {"id": 207, "type": 4, "len": 1, "data": "00"},
+        "f1_heavy_dirt_enabled": {"id": 145, "type": 4, "len": 1, "data": "01"},
+        "f1_heavy_dirt_disabled": {"id": 145, "type": 4, "len": 1, "data": "00"},
+        "f1_ph_data": {"id": 142, "type": 2, "len": 4, "data": "2c011901"},
+        "f1_working_time": {"id": 131, "type": 2, "len": 4, "data": "e8030000"},
+        "f1_cleaning_depth": {"id": 206, "type": 2, "len": 4, "data": "10000000"},
+        "f1_system_time": {"id": 70, "type": 2, "len": 4, "data": "00010000"},
         "query_only": {"id": 0},
     }
 
