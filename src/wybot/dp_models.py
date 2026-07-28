@@ -6,6 +6,10 @@ from pydantic import BaseModel
 
 _LOGGER = logging.getLogger(__name__)
 
+# F1 cleaning mode constants (outside DS20's 0-6 range)
+F1_CLEANING_MODE_SMART = 14
+F1_CLEANING_MODE_STANDARD = 15
+
 
 class DP(BaseModel):
     """Represents the response for a device command operation."""
@@ -139,6 +143,11 @@ class CleaningMode(GenericDP):
         "Turbo Floor",
         "Eco Floor",
     ]
+    # F1-specific modes (values 14-15, outside DS20's 0-6 range)
+    F1_CLEANING_MODES = {
+        14: "Smart",
+        15: "Standard",
+    }
 
     def __init__(self, data: DP | None = None, mode: str | None = None) -> None:
         if data is not None:
@@ -150,10 +159,22 @@ class CleaningMode(GenericDP):
     def cleaning_mode(self) -> str:
         if self.data is None:
             return self.CLEANING_MODES[0]  # Default to first mode if no data
-        return self.CLEANING_MODES[int(self.data, 16)]
+        mode_val = int(self.data, 16)
+        # Check F1-specific modes first
+        if mode_val in self.F1_CLEANING_MODES:
+            return self.F1_CLEANING_MODES[mode_val]
+        # DS20 modes (0-6)
+        if mode_val < len(self.CLEANING_MODES):
+            return self.CLEANING_MODES[mode_val]
+        return f"Unknown ({mode_val})"
 
     @cleaning_mode.setter
     def cleaning_mode(self, data: str) -> None:
+        # Check F1 modes
+        for hex_val, name in self.F1_CLEANING_MODES.items():
+            if data == name:
+                self.data = f"{hex_val:02x}"
+                return
         self.data = f"{self.CLEANING_MODES.index(data):02x}"
 
     def __str__(self) -> str:
@@ -175,17 +196,37 @@ class Battery(GenericDP):
 
     @property
     def battery_level(self) -> int:
-        # get the last 2 characters of the data of battery_level and convert from hex to decimal
+        """Return the robot battery level as percentage (0-100).
+
+        On DS20 (2-byte format): last byte = robot battery %
+        On F1 (3-byte format):   last byte = robot battery %
+        """
         if self.data is None:
             return 0
         return int(self.data[-2:], 16)
 
     @property
     def charge_state(self) -> BatteryState:
-        # get the first 2 digits of battery_property and convert from hex to decimal
+        """Return the charging state (first byte)."""
         if self.data is None:
             return BatteryState.NOT_PLUGGED_IN
         return BatteryState(int(self.data[:2], 16))
+
+    @property
+    def solar_battery_level(self) -> int | None:
+        """Return the solar/integrated battery percentage (F1 only).
+
+        The F1 sends 3 bytes for DP 50: [charge_state][solar_battery%][robot_battery%]
+        The DS20 sends 2 bytes: [charge_state][robot_battery%]
+
+        Returns None when the data is 2-byte (DS20) and the solar byte is absent.
+        """
+        if self.data is None or len(self.data) < 6:  # 3 bytes = 6 hex chars
+            return None
+        try:
+            return int(self.data[2:4], 16)
+        except (ValueError, IndexError):
+            return None
 
     def __str__(self) -> str:
         return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
@@ -194,8 +235,13 @@ class Battery(GenericDP):
         return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
 
 
-class SolarEnergyHarvested(GenericDP):
-    """DP 131: Total solar energy harvested in Wh (little-endian 4-byte value)."""
+class WorkingTime(GenericDP):
+    """DP 131: Total working time in seconds (little-endian 4-byte value).
+
+    Originally labeled 'SolarEnergyHarvested' (Wh) — APK analysis confirmed
+    the correct meaning is working time in seconds.
+    Backward-compatible alias ``SolarEnergyHarvested`` is kept below.
+    """
 
     id = 131
     type = 2
@@ -206,22 +252,34 @@ class SolarEnergyHarvested(GenericDP):
 
     @property
     def energy_wh(self) -> int:
-        """Return total solar energy harvested in Wh."""
+        """Return the raw little-endian value (backward compat).
+
+        Historically exposed as energy_wh; actually seconds of working time.
+        Consumers that need the true value should use ``seconds``.
+        """
         if self.data is None or len(self.data) < 8:
             return 0
-        # Data is little-endian, convert to int
         return int.from_bytes(bytes.fromhex(self.data), byteorder="little")
 
     @property
+    def seconds(self) -> int:
+        """Return total working time in seconds."""
+        return self.energy_wh
+
+    @property
     def energy_kwh(self) -> float:
-        """Return total solar energy harvested in kWh."""
+        """Return the raw value divided by 1000 (backward compat)."""
         return self.energy_wh / 1000.0
 
     def __str__(self) -> str:
-        return f"({type(self).__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
+        return f"({type(self).__name__}, seconds={self.seconds})"
 
     def __repr__(self) -> str:
-        return f"({type(self).__name__}, energy_wh={self.energy_wh}, energy_kwh={self.energy_kwh})"
+        return f"({type(self).__name__}, seconds={self.seconds})"
+
+
+# Backward-compatible alias
+SolarEnergyHarvested = WorkingTime
 
 
 class SolarDockBattery(GenericDP):
@@ -433,6 +491,168 @@ class DockConnectionStatus(GenericDP):
         return f"({type(self).__name__}, is_docked={self.is_docked})"
 
 
+# =============================================================================
+# F1-Specific DP Classes (confirmed via APK reverse engineering)
+# Source: WYBOT.apk Flutter AOT-compiled libapp.so log strings
+# =============================================================================
+
+
+class AutoRunMode(GenericDP):
+    """DP 207 (0xCF): Auto-run mode toggle (F1).
+
+    APK: "parseBLEData: getAutoRunMode DP_ID_AUTO_RUN 0XCF mode: "
+    When enabled, the robot starts skimming automatically when battery is sufficient.
+    """
+
+    id = 207
+    type = 4
+    len = 1
+
+    def __init__(self, data: DP) -> None:
+        super().__init__(data)
+
+    @property
+    def is_enabled(self) -> bool:
+        """Return True if auto-run is enabled."""
+        if self.data is None:
+            return False
+        return int(self.data, 16) > 0
+
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, is_enabled={self.is_enabled})"
+
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, is_enabled={self.is_enabled})"
+
+
+class HeavyDirtMode(GenericDP):
+    """DP 145 (0x91): Heavy dirt mode (F1).
+
+    APK: "check mqtt delay DP_ID:OX91 heavyDirt mode: "
+    When enabled, the robot runs extra cleaning cycles for dirty pools.
+    """
+
+    id = 145
+    type = 4
+    len = 1
+
+    def __init__(self, data: DP) -> None:
+        super().__init__(data)
+
+    @property
+    def is_enabled(self) -> bool:
+        """Return True if heavy dirt mode is enabled."""
+        if self.data is None:
+            return False
+        return int(self.data, 16) > 0
+
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, is_enabled={self.is_enabled})"
+
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, is_enabled={self.is_enabled})"
+
+
+class PhData(GenericDP):
+    """DP 142 (0x8E): pH value and temperature (F1).
+
+    APK: "parseBLEData: PH_DATA:0X8E, pHvalue: " + "tempValue: "
+    Data format: 4 bytes (8 hex chars)
+    - Bytes 0-1 (hex chars 0-3): pH value * 100 (little-endian)
+    - Bytes 2-3 (hex chars 4-7): temperature * 10 (little-endian)
+
+    BLE-only — not available via MQTT cloud stream.
+    """
+
+    id = 142
+    type = 2
+    len = 4
+
+    def __init__(self, data: DP) -> None:
+        super().__init__(data)
+
+    @property
+    def ph_value(self) -> float | None:
+        """Return the pH value (raw / 100)."""
+        if self.data is None or len(self.data) < 4:
+            return None
+        try:
+            return int(self.data[:4], 16) / 100.0
+        except (ValueError, IndexError):
+            return None
+
+    @property
+    def temperature(self) -> float | None:
+        """Return the temperature from pH electrode (raw / 10)."""
+        if self.data is None or len(self.data) < 8:
+            return None
+        try:
+            return int(self.data[4:8], 16) / 10.0
+        except (ValueError, IndexError):
+            return None
+
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, ph={self.ph_value}, temp={self.temperature})"
+
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, ph={self.ph_value}, temp={self.temperature})"
+
+
+class CleaningDepthRange(GenericDP):
+    """DP 206 (0xCE): Cleaning depth range (F1).
+
+    APK: "parseBLEData: getCleaningDepth DP_ID_CLEANING_DEPTH_RANGE 0xCE min: "
+    Adjustable cleaning depth for the F1 skimmer.
+    """
+
+    id = 206
+    type = 2
+    len = 4
+
+    def __init__(self, data: DP) -> None:
+        super().__init__(data)
+
+    @property
+    def raw_value(self) -> int:
+        """Return the raw little-endian value."""
+        if self.data is None or len(self.data) < 8:
+            return 0
+        return int.from_bytes(bytes.fromhex(self.data), byteorder="little")
+
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, raw_value={self.raw_value})"
+
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, raw_value={self.raw_value})"
+
+
+class SystemTime(GenericDP):
+    """DP 70 (0x46): System time (F1).
+
+    APK: "parseBLEData: DP_ID_SYSTEM_TIME 0x46 sysTime: "
+    """
+
+    id = 70
+    type = 2
+    len = 4
+
+    def __init__(self, data: DP) -> None:
+        super().__init__(data)
+
+    @property
+    def raw_value(self) -> int:
+        """Return the raw little-endian value."""
+        if self.data is None or len(self.data) < 8:
+            return 0
+        return int.from_bytes(bytes.fromhex(self.data), byteorder="little")
+
+    def __str__(self) -> str:
+        return f"({type(self).__name__}, raw_value={self.raw_value})"
+
+    def __repr__(self) -> str:
+        return f"({type(self).__name__}, raw_value={self.raw_value})"
+
+
 # Mapping of types to classes
 wybot_dp_id = {
     0: CleaningStatus,
@@ -441,9 +661,14 @@ wybot_dp_id = {
     13: GenericDP,  # Unknown 4-byte value
     15: GenericDP,
     50: Battery,
+    70: SystemTime,  # System time (F1)
     77: GenericDP,  # Unknown 36-byte data (cleaning map/log?)
     79: Schedule,  # Schedule configuration
-    131: SolarEnergyHarvested,  # Total solar energy harvested (Wh)
+    131: WorkingTime,  # Working time (seconds) — was SolarEnergyHarvested
+    142: PhData,  # pH value + temperature (F1)
+    145: HeavyDirtMode,  # Heavy dirt mode (F1)
+    206: CleaningDepthRange,  # Cleaning depth range (F1)
+    207: AutoRunMode,  # Auto-run mode (F1)
     209: DeviceStatus,  # Device status flag
     212: ConnectionStatus,  # Connection status
     213: DockConnectionStatus,  # Dock connection status
