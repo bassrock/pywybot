@@ -228,11 +228,34 @@ class Battery(GenericDP):
         except (ValueError, IndexError):
             return None
 
+    @property
+    def robot_battery_level(self) -> int | None:
+        """Return the robot battery level, or None when stale (F1 unplugged).
+
+        On the F1, the robot battery byte (byte 2) only updates when the device
+        is physically plugged in (charge_state CHARGING or CHARGED). When running
+        on solar alone (NOT_PLUGGED_IN), the value is frozen/stale and does not
+        reflect actual battery state.
+
+        - DS20 (2-byte): always returns the robot battery % (no stale issue)
+        - F1 (3-byte) + plugged in: returns the robot battery %
+        - F1 (3-byte) + unplugged: returns None (stale data, not reliable)
+        """
+        if self.data is None:
+            return None
+        # DS20 2-byte format — no staleness issue
+        if len(self.data) < 6:
+            return int(self.data[-2:], 16)
+        # F1 3-byte format — check charge_state
+        if self.charge_state == BatteryState.NOT_PLUGGED_IN:
+            return None  # stale, not reporting
+        return int(self.data[-2:], 16)
+
     def __str__(self) -> str:
-        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
+        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level}, robot_battery_level={self.robot_battery_level})"
 
     def __repr__(self) -> str:
-        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level})"
+        return f"({type(self).__name__}, charge_state={self.charge_state}, battery_level={self.battery_level}, robot_battery_level={self.robot_battery_level})"
 
 
 class WorkingTime(GenericDP):
