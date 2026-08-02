@@ -600,9 +600,10 @@ class PhData(GenericDP):
         if self.data is None or len(self.data) < 4:
             return None
         try:
-            return int(self.data[:4], 16) / 100.0
-        except (ValueError, IndexError):
+            raw = int.from_bytes(bytes.fromhex(self.data[:4]), byteorder="little")
+        except ValueError:
             return None
+        return raw / 100.0
 
     @property
     def temperature(self) -> float | None:
@@ -610,9 +611,10 @@ class PhData(GenericDP):
         if self.data is None or len(self.data) < 8:
             return None
         try:
-            return int(self.data[4:8], 16) / 10.0
-        except (ValueError, IndexError):
+            raw = int.from_bytes(bytes.fromhex(self.data[4:8]), byteorder="little")
+        except ValueError:
             return None
+        return raw / 10.0
 
     def __str__(self) -> str:
         return f"({type(self).__name__}, ph={self.ph_value}, temp={self.temperature})"

@@ -3,11 +3,12 @@
 import pytest
 
 from wybot.dp_models import (
+    DP,
     AutoRunMode,
     Battery,
     BatteryState,
-    CleaningMode,
     CleaningDepthRange,
+    CleaningMode,
     HeavyDirtMode,
     PhData,
     SolarEnergyHarvested,
@@ -239,28 +240,24 @@ class TestPhData:
     """Tests for PhData DP."""
 
     def test_ph_value(self, sample_dp_data):
+        """pH is the first 2 bytes, little-endian, scaled by 100."""
         dp = DP(**sample_dp_data["f1_ph_data"])
         ph = PhData(dp)
-        # 0x012c = 300, /100 = 3.0 pH... wait, let me check the encoding
-        # Actually "2c01" as first 4 hex chars = 0x012c LE = 300, /100 = 3.0
-        # But the data is "2c011901" — first 4 chars = "2c01" → int("012c", 16) = 300
-        # Hmm, actually int("2c01", 16) = 0x2c01 = 11265... that doesn't seem right
-        # The code does int(self.data[:4], 16) which is int("2c01", 16) = 11265
-        # That seems like a bug — should probably be LE. But let's test what the code does.
-        # Actually the code does int(self.data[:4], 16) which treats the first 4 hex chars as a big-endian hex.
-        # For "2c011901": first 4 chars = "2c01" → int("2c01", 16) = 11265 → /100 = 112.65
-        # That's clearly wrong for pH. The data format needs to be verified.
-        # For now, just test the code as written.
-        result = ph.ph_value
-        assert result is not None  # it returns a float, we just verify it's not None
+        # "2c01" little-endian → 0x012c = 300 → pH 3.00
+        assert ph.ph_value == 3.0
+
+    def test_ph_value_typical_pool(self):
+        """A typical pool reading of pH 7.20 encodes as 720 = 0x02d0 → "d002"."""
+        dp = DP(id=142, type=2, len=4, data="d0021901")
+        ph = PhData(dp)
+        assert ph.ph_value == 7.2
 
     def test_temperature(self, sample_dp_data):
+        """Temperature is the last 2 bytes, little-endian, scaled by 10."""
         dp = DP(**sample_dp_data["f1_ph_data"])
         ph = PhData(dp)
-        # "2c011901" → chars 4-8 = "1901" → int("1901", 16) = 6401 → /10 = 640.1
-        # Again this seems like it should be LE, but testing as coded.
-        result = ph.temperature
-        assert result is not None
+        # "1901" little-endian → 0x0119 = 281 → 28.1 °C
+        assert ph.temperature == 28.1
 
     def test_no_data(self):
         dp = DP(id=142, type=2, len=4, data=None)
@@ -269,10 +266,18 @@ class TestPhData:
         assert ph.temperature is None
 
     def test_short_data(self):
+        """A truncated payload yields None rather than a bogus reading."""
         dp = DP(id=142, type=2, len=4, data="2c")
         ph = PhData(dp)
-        assert ph.ph_value is not None  # "2c" → int("2c", 16) = 44 → 0.44
-        assert ph.temperature is None  # not enough chars
+        assert ph.ph_value is None
+        assert ph.temperature is None
+
+    def test_odd_length_data(self):
+        """Non-hex-decodable payloads yield None rather than raising."""
+        dp = DP(id=142, type=2, len=4, data="2c0zzz01")
+        ph = PhData(dp)
+        assert ph.ph_value is None
+        assert ph.temperature is None
 
     def test_str_repr(self, sample_dp_data):
         dp = DP(**sample_dp_data["f1_ph_data"])
