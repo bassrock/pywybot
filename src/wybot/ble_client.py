@@ -15,6 +15,26 @@ from .dp_models import GenericDP
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _normalize_mac(value: str | None) -> str | None:
+    """Return a MAC as 12 uppercase hex digits, or None if it is not one.
+
+    Accepts the separator-less form devices advertise as their BLE name
+    ("3C8427565A1A") and the punctuated form addresses use
+    ("3C:84:27:56:5A:1A"), so the two can be compared directly.
+    """
+    if not value:
+        return None
+    cleaned = value.upper().replace(":", "").replace("-", "").replace(".", "")
+    if len(cleaned) != 12:
+        return None
+    try:
+        int(cleaned, 16)
+    except ValueError:
+        return None
+    return cleaned
+
+
 # =============================================================================
 # BLE Service and Characteristic UUIDs
 # =============================================================================
@@ -549,20 +569,62 @@ class WyBotBLEClient:
                     device.address,
                 )
 
-                # Check if device name matches (could be in name or address)
-                if device.name and ble_name.upper() in device.name.upper():
-                    _LOGGER.info(
-                        "Found WyBot device: %s at %s", device.name, device.address
-                    )
-                    return device
+            # Address first. The advertising address is the only unambiguous
+            # identity available here: BLE relays (some smart-home wall panels
+            # do this) rebroadcast a device's advertisement under their own
+            # address while keeping its local name. Matching the name first
+            # lets the scan return the relay, and connecting to it succeeds --
+            # it is a real device -- but it carries none of the WyBot
+            # characteristics, so every status query then fails with "EE01
+            # characteristic not found" and no status broadcast.
+            target = _normalize_mac(ble_name)
+            if target:
+                for device in devices:
+                    if _normalize_mac(device.address) == target:
+                        _LOGGER.info(
+                            "Found WyBot device by address: %s at %s",
+                            device.name,
+                            device.address,
+                        )
+                        return device
 
-                # Also check if ble_name matches the MAC address format
-                # ble_name is like "CCBA97932A96", address is like "CC:BA:97:93:2A:96"
-                clean_ble_name = ble_name.upper().replace(":", "")
+            # Fall back to the advertised name, for devices whose BLE name is
+            # not their address, or whose address has changed. Warn when more
+            # than one device answers to the name, which is the relay signature.
+            named = [
+                device
+                for device in devices
+                if device.name and ble_name.upper() in device.name.upper()
+            ]
+            if len(named) > 1:
+                _LOGGER.warning(
+                    "%d devices advertise the name %s (%s); no address matched %s, "
+                    "so the first is being used and it may be a BLE relay rather "
+                    "than the device itself",
+                    len(named),
+                    ble_name,
+                    ", ".join(d.address for d in named),
+                    ble_name,
+                )
+            if named:
+                device = named[0]
+                _LOGGER.info(
+                    "Found WyBot device by name: %s at %s",
+                    device.name,
+                    device.address,
+                )
+                return device
+
+            # Last resort: the loose substring comparison this function used
+            # before address matching was introduced. It still catches a
+            # ble_name that carries a prefix ("DS20-<MAC>") on a device
+            # advertising no local name, which neither pass above can match.
+            clean_ble_name = ble_name.upper().replace(":", "")
+            for device in devices:
                 clean_address = device.address.upper().replace(":", "")
                 if clean_ble_name in clean_address or clean_address in clean_ble_name:
                     _LOGGER.info(
-                        "Found WyBot device by MAC: %s at %s",
+                        "Found WyBot device by partial MAC: %s at %s",
                         device.name,
                         device.address,
                     )

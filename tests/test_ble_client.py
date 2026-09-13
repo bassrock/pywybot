@@ -237,6 +237,26 @@ def test_parse_ble_response_not_enough_data_breaks():
 
 
 # ===========================================================================
+# _normalize_mac
+# ===========================================================================
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("3C8427565A1A", "3C8427565A1A"),
+        ("3c:84:27:56:5a:1a", "3C8427565A1A"),
+        ("3C-84-27-56-5A-1A", "3C8427565A1A"),
+        (None, None),
+        ("", None),
+        ("DS20-3C8427565A1A", None),  # too long once separators are stripped
+        ("CCBA97932A9", None),  # 11 digits
+        ("ZZBA97932A96", None),  # right length, not hex
+    ],
+)
+def test_normalize_mac(value, expected):
+    assert bc._normalize_mac(value) == expected
+
+
+# ===========================================================================
 # scan_for_device
 # ===========================================================================
 @pytest.mark.asyncio
@@ -266,6 +286,62 @@ async def test_scan_matches_by_mac():
     adapter.discovered_devices.return_value = [dev]
     client = WyBotBLEClient(adapter)
     assert await client.scan_for_device("CCBA97932A96") is dev
+
+
+@pytest.mark.asyncio
+async def test_scan_prefers_address_over_relayed_name():
+    """A BLE relay advertising the device's name must not win over the device.
+
+    Smart-home wall panels rebroadcast advertisements they overhear while
+    keeping the original local name. Connecting to the relay succeeds -- it is
+    a real device -- but it has none of the WyBot characteristics, so every
+    status query afterwards fails. The relay is listed first here because that
+    is the losing order: discovered_devices() has no defined ordering.
+    """
+    adapter = make_adapter()
+    relay = SimpleNamespace(name="DS20-3C8427565A1A", address="7C:10:15:02:99:B7")
+    dock = SimpleNamespace(name="DS20-3C8427565A1A", address="3C:84:27:56:5A:1A")
+    adapter.discovered_devices.return_value = [relay, dock]
+    client = WyBotBLEClient(adapter)
+    assert await client.scan_for_device("3C8427565A1A") is dock
+
+
+@pytest.mark.asyncio
+async def test_scan_falls_back_to_name_when_no_address_matches(caplog):
+    """With no address match, the name is all there is -- but warn when ambiguous."""
+    adapter = make_adapter()
+    relay_a = SimpleNamespace(name="DS20-3C8427565A1A", address="7C:10:15:02:99:B7")
+    relay_b = SimpleNamespace(name="DS20-3C8427565A1A", address="7C:10:15:02:34:DA")
+    adapter.discovered_devices.return_value = [relay_a, relay_b]
+    client = WyBotBLEClient(adapter)
+    with caplog.at_level("WARNING"):
+        assert await client.scan_for_device("3C8427565A1A") is relay_a
+    assert "may be a BLE relay" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_scan_matches_name_when_ble_name_is_not_a_mac():
+    """A non-MAC BLE name still resolves by name, with no address pass to run."""
+    adapter = make_adapter()
+    dev = SimpleNamespace(name="WyBot-Pool-Robot", address="CC:BA:97:93:2A:96")
+    adapter.discovered_devices.return_value = [dev]
+    client = WyBotBLEClient(adapter)
+    assert await client.scan_for_device("Pool-Robot") is dev
+
+
+@pytest.mark.asyncio
+async def test_scan_partial_mac_fallback_preserved():
+    """A prefixed ble_name on a nameless device still resolves.
+
+    Pre-existing behaviour: neither the exact-address pass nor the name pass
+    can match here, so the original loose substring comparison has to remain
+    as a last resort.
+    """
+    adapter = make_adapter()
+    dev = SimpleNamespace(name=None, address="3C:84:27:56:5A:1A")
+    adapter.discovered_devices.return_value = [dev]
+    client = WyBotBLEClient(adapter)
+    assert await client.scan_for_device("DS20-3C8427565A1A") is dev
 
 
 @pytest.mark.asyncio
