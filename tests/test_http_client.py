@@ -1,5 +1,6 @@
 """Tests for wybot.http_client.WyBotHTTPClient (async aiohttp API)."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -123,6 +124,39 @@ async def test_authenticate_403_raises(client, session):
     session.post.return_value = _ctx(_resp(403, text="forbidden"))
     with pytest.raises(WybotAuthError):
         await client.authenticate()
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "reason", "message"),
+    [
+        (412, 412, "USER_OR_PASSWORD_WRONG", "user or password wrong"),
+        (411, 411, "USER_NOT_FOUND", "user not found"),
+        # The code in the body is authoritative even if the HTTP status is not.
+        (200, 412, "USER_OR_PASSWORD_WRONG", "user or password wrong"),
+    ],
+)
+async def test_login_bad_credentials_raise_auth_error_without_retry(
+    client, session, status, code, reason, message
+):
+    # Bodies as returned by https://api.wybotpool.com/api/user/login (pywybot#4).
+    session.post.return_value = _ctx(
+        _resp(
+            status,
+            {"code": code, "reason": reason, "message": message, "metadata": {}},
+        )
+    )
+    with pytest.raises(WybotAuthError, match=message):
+        await client.login()
+    assert session.post.call_count == 1
+
+
+async def test_login_non_json_error_body_retries_as_connection(client, session):
+    resp = _resp(502, text="<html>Bad Gateway</html>")
+    resp.json = AsyncMock(side_effect=ValueError("not json"))
+    session.post.return_value = _ctx(resp)
+    with pytest.raises(WybotConnectionError):
+        await client.login()
+    assert session.post.call_count == http_client.MAX_RETRIES
 
 
 async def test_authenticate_missing_password_raises(session):
@@ -257,11 +291,35 @@ async def test_register_presence_user_id_none(client, session):
     session.post.assert_not_called()
 
 
-async def test_register_presence_failure_then_false(client, session):
+async def test_register_presence_failure_is_not_retried(client, session):
+    # A failing backend is not retried: the caller registers again on its own
+    # schedule, and a retry would only double the time spent on a dead endpoint.
     _authed(client)
     session.post.return_value = _ctx(_resp(500))
     assert await client.register_presence() is False
-    assert session.post.call_count == 2
+    assert session.post.call_count == 1
+
+
+async def test_register_presence_uses_its_own_short_timeout(client, session):
+    _authed(client)
+    session.post.return_value = _ctx(_resp(200))
+    await client.register_presence()
+    timeout = session.post.call_args.kwargs["timeout"]
+    assert timeout.total == http_client.PRESENCE_TIMEOUT
+    assert http_client.PRESENCE_TIMEOUT < http_client.TIMEOUT
+
+
+async def test_register_presence_timeout_returns_false(client, session):
+    _authed(client)
+    session.post.return_value = _ctx(exc=TimeoutError("slow"))
+    assert await client.register_presence() is False
+
+
+async def test_register_presence_propagates_cancellation(client, session):
+    _authed(client)
+    session.post.return_value = _ctx(exc=asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        await client.register_presence()
 
 
 async def test_register_presence_exception_returns_false(client, session):
