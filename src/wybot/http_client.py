@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from typing import Any
 
 import aiohttp
 
@@ -35,6 +36,17 @@ DEFAULT_HEADER = {
 }
 
 TOKEN_REFRESH_INTERVAL = 50 * 60  # Proactively refresh token after 50 minutes
+
+# Presence registration is best-effort, so it gets a short timeout of its own
+# rather than the shared TIMEOUT: the endpoint has been seen to stall ~40s and
+# then return HTTP 500.
+PRESENCE_TIMEOUT = 10
+
+# WyBot ``code`` values in a login response body that mean the credentials are
+# wrong. The API sends them with HTTP 411/412 rather than 401/403.
+USER_NOT_FOUND = 411
+USER_OR_PASSWORD_WRONG = 412
+BAD_CREDENTIAL_CODES = frozenset({USER_NOT_FOUND, USER_OR_PASSWORD_WRONG})
 
 
 class WyBotHTTPClient:
@@ -140,14 +152,20 @@ class WyBotHTTPClient:
                     allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=TIMEOUT),
                 ) as response:
-                    if response.status == 200:
-                        return LoginResponse(**await response.json(content_type=None))
-                    if response.status in (401, 403):
-                        raise WybotAuthError(
-                            f"Authentication rejected with status {response.status}"
-                        )
                     status = response.status
-                    text = await response.text()
+                    body = await _read_json_object(response)
+                    text = "" if body is not None else await response.text()
+                bad_credentials = (
+                    body is not None and body.get("code") in BAD_CREDENTIAL_CODES
+                )
+                if status == 200 and body is not None and not bad_credentials:
+                    return LoginResponse(**body)
+                if status in (401, 403) or bad_credentials:
+                    # The server has answered definitively; retrying won't help.
+                    message = body.get("message") if body is not None else None
+                    raise WybotAuthError(
+                        message or f"Authentication rejected with status {status}"
+                    )
                 _LOGGER.warning(
                     "Login attempt %d failed with status %d: %s",
                     attempt + 1,
@@ -262,7 +280,10 @@ class WyBotHTTPClient:
 
         Signals to the WyBot cloud that we're actively listening, which may help
         ensure MQTT messages are relayed when devices come online. Best-effort:
-        returns False instead of raising.
+        returns False instead of raising, except that cancellation still
+        propagates. A single attempt bounded by PRESENCE_TIMEOUT is made; the
+        caller is expected to call again periodically rather than rely on a
+        retry here.
         """
         try:
             await self._refresh_token_if_needed()
@@ -275,27 +296,29 @@ class WyBotHTTPClient:
             return False
 
         session = self._get_session()
-        for attempt in range(2):
-            try:
-                async with session.post(
-                    NOTIFICATION_URL,
-                    headers={**DEFAULT_HEADER, "Authorization": f"token {self._token}"},
-                    json={"userId": self._user_id},
-                    allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=TIMEOUT),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.debug("Presence registered successfully")
-                        return True
-                    _LOGGER.debug(
-                        "Presence registration failed (attempt %d): status=%d",
-                        attempt + 1,
-                        response.status,
-                    )
-            except Exception as err:  # noqa: BLE001
+        try:
+            async with session.post(
+                NOTIFICATION_URL,
+                headers={**DEFAULT_HEADER, "Authorization": f"token {self._token}"},
+                json={"userId": self._user_id},
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=PRESENCE_TIMEOUT),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.debug("Presence registered successfully")
+                    return True
                 _LOGGER.debug(
-                    "Presence registration error (attempt %d): %s", attempt + 1, err
+                    "Presence registration failed: status=%d", response.status
                 )
-            if attempt == 0:
-                await asyncio.sleep(2)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Presence registration error: %s", err)
         return False
+
+
+async def _read_json_object(response: aiohttp.ClientResponse) -> dict[str, Any] | None:
+    """Return the response body as a JSON object, or None if it isn't one."""
+    try:
+        body = await response.json(content_type=None)
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
